@@ -1,0 +1,10 @@
+[package]
+name = "aurora-audio"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rodio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true

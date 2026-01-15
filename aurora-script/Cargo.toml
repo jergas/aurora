@@ -1,0 +1,10 @@
+[package]
+name = "aurora-script"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mlua.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
