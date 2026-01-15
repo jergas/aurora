@@ -1,6 +1,10 @@
 name: Release Build
 
 on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
   release:
     types: [published]
 
@@ -38,6 +42,12 @@ jobs:
 
       - name: Build Release
         run: cargo build --release --bin aurora-player
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: target/release/${{ matrix.artifact_name }}
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v1
