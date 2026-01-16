@@ -1,5 +1,6 @@
 use anyhow::Result;
 use aurora_audio::AudioEngine;
+use aurora_core::{LibraryManager, Track};
 use aurora_ui::{MainWindow, ThemePalette, extract_palette, AppColors};
 use slint::ComponentHandle;
 use std::path::{Path, PathBuf};
@@ -20,11 +21,12 @@ async fn main() -> Result<()> {
     let engine = Arc::new(AudioEngine::new()?);
     println!("Audio Engine initialized.");
 
+    // Initialize Library Manager
+    let library = Arc::new(LibraryManager::new(PathBuf::from("aurora.db"))?);
+    println!("Library Manager initialized.");
+
     let ui = aurora_ui::create_window();
     let ui_handle = ui.as_weak();
-
-    let mut playlist: Vec<PathBuf> = Vec::new();
-    let _current_index: Option<usize> = None;
 
     // Simple test if a file is provided as argument
     let args: Vec<String> = std::env::args().collect();
@@ -33,125 +35,57 @@ async fn main() -> Result<()> {
         let path = Path::new(path_str);
         
         if path.exists() {
-            let (target_file, cover_path) = if path.is_dir() {
-                // Find all audio files for the playlist
-                playlist = std::fs::read_dir(path)?
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .filter(|p| {
-                        if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                            ["mp3", "flac", "wav", "m4a", "ogg"].contains(&ext)
-                        } else {
-                            false
-                        }
-                    })
-                    .collect();
-                playlist.sort(); 
-                
-                let audio = playlist.first().cloned();
-                
-                // Find cover art
-                let cover = std::fs::read_dir(path)?
-                    .filter_map(|e| e.ok())
-                    .find(|e| {
-                        let name = e.file_name().to_string_lossy().to_lowercase();
-                        let is_image = ["jpg", "jpeg", "png"].iter().any(|ext| name.ends_with(ext));
-                        let is_common_name = name.starts_with("cover") || name.starts_with("folder") || name.starts_with("front") || name.starts_with("crosby");
-                        is_image && is_common_name
-                    })
-                    .or_else(|| {
-                         std::fs::read_dir(path).ok()?.filter_map(|e| e.ok()).find(|e| {
-                             let name = e.file_name().to_string_lossy().to_lowercase();
-                             ["jpg", "jpeg", "png"].iter().any(|ext| name.ends_with(ext))
-                         })
-                    })
-                    .map(|e| e.path());
-
-                (audio, cover)
-            } else {
-                playlist = vec![path.to_path_buf()];
-                let cover = path.parent()
-                    .and_then(|p| std::fs::read_dir(p).ok())
-                    .and_then(|mut entries| {
-                        entries.find_map(|e| {
-                            let e = e.ok()?;
-                            let name = e.file_name().to_string_lossy().to_lowercase();
-                            let is_image = ["jpg", "jpeg", "png"].iter().any(|ext| name.ends_with(ext));
-                            if is_image && (name.starts_with("cover") || name.starts_with("folder") || name.starts_with("front")) {
-                                Some(e.path())
-                            } else {
-                                None
-                            }
-                        })
-                    });
-                (Some(path.to_path_buf()), cover)
-            };
-
-            if let Some(audio_path) = target_file {
-                let uri = format!("file://{}", audio_path.canonicalize()?.display());
-                println!("Playing: {}", uri);
-                engine.play_file(&uri)?;
-                
-                // Update UI metadata
-                ui.set_track_title(audio_path.file_name().unwrap().to_string_lossy().to_string().into());
-
-                if let Some(cp) = cover_path {
-                    println!("Found cover art: {:?}", cp);
-                    if let Ok(palette) = extract_palette(&cp) {
-                        // Update UI cover image
-                        if let Ok(slint_img) = slint::Image::load_from_path(&cp) {
-                            ui.set_album_art(slint_img);
-                        }
-
-                        let p = ThreadSafePalette {
-                            bg: palette.background,
-                            primary: palette.primary,
-                            secondary: palette.secondary,
-                            accent: palette.accent,
-                        };
-
-                        let ui_weak = ui_handle.clone(); 
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = ui_weak.upgrade() {
-                                let colors = ui.global::<AppColors>();
-                                
-                                colors.set_background(slint::Color::from_argb_u8(255, 
-                                    parse_hex(&p.bg, 1), 
-                                    parse_hex(&p.bg, 3), 
-                                    parse_hex(&p.bg, 5)));
-                                colors.set_primary(slint::Color::from_argb_u8(255, 
-                                    parse_hex(&p.primary, 1), 
-                                    parse_hex(&p.primary, 3), 
-                                    parse_hex(&p.primary, 5)));
-                                 colors.set_secondary(slint::Color::from_argb_u8(255, 
-                                    parse_hex(&p.secondary, 1), 
-                                    parse_hex(&p.secondary, 3), 
-                                    parse_hex(&p.secondary, 5)));
-                                 colors.set_accent(slint::Color::from_argb_u8(255, 
-                                    parse_hex(&p.accent, 1), 
-                                    parse_hex(&p.accent, 3), 
-                                    parse_hex(&p.accent, 5)));
-                            }
-                        });
-                    }
-                }
-            }
+            println!("Scanning directory: {:?}", path);
+            library.scan_directory(path)?;
         }
     }
 
+    // Load playlist from library
+    let tracks = library.get_all_tracks()?;
+    let playlist: Vec<PathBuf> = tracks.iter().map(|t| PathBuf::from(&t.path)).collect();
+    
     // Shared state for playback control
     struct PlayerState {
         playlist: Vec<PathBuf>,
+        tracks: Vec<Track>,
         current_index: usize,
     }
+    
     let state = Arc::new(Mutex::new(PlayerState {
         playlist: playlist,
+        tracks: tracks,
         current_index: 0,
     }));
 
+    // Find cover art for initial track if any
+    let initial_cover = {
+        let state = state.lock().unwrap();
+        if !state.playlist.is_empty() {
+            let path = &state.playlist[0];
+            find_cover_art(path.parent().unwrap_or(path))
+        } else {
+            None
+        }
+    };
+
+    if let Some(cp) = initial_cover {
+        update_ui_theme(ui_handle.clone(), &cp);
+    }
+
+    // Play first track if available
+    {
+        let state = state.lock().unwrap();
+        if !state.playlist.is_empty() {
+            let path = &state.playlist[0];
+            let uri = format!("file://{}", path.to_string_lossy());
+            engine.play_file(&uri)?;
+            ui.set_track_title(state.tracks[0].title.clone().into());
+            ui.set_track_artist(state.tracks[0].artist.clone().into());
+        }
+    }
+
     // Connect callbacks
     let engine_c = engine.clone();
-    let state_c = state.clone();
     let engine_next = engine.clone();
     let state_next = state.clone();
     let ui_next = ui_handle.clone();
@@ -176,14 +110,21 @@ async fn main() -> Result<()> {
         
         state.current_index = (state.current_index + 1) % state.playlist.len();
         let next_path = &state.playlist[state.current_index];
+        let next_track = &state.tracks[state.current_index];
         let uri = format!("file://{}", next_path.to_string_lossy());
         println!("Playing Next: {}", uri);
         let _ = engine_next.play_file(&uri);
         
         // Update UI
-        let ui = ui_next.unwrap();
-        ui.set_track_title(next_path.file_name().unwrap().to_string_lossy().to_string().into());
-        // Note: Cover art update logic would need to be duplicated or refactored here
+        if let Some(ui) = ui_next.upgrade() {
+            ui.set_track_title(next_track.title.clone().into());
+            ui.set_track_artist(next_track.artist.clone().into());
+            
+            // Update cover & theme
+            if let Some(cp) = find_cover_art(next_path.parent().unwrap_or(next_path)) {
+                update_ui_theme(ui_next.clone(), &cp);
+            }
+        }
     });
 
     ui.on_prev(move || {
@@ -197,13 +138,20 @@ async fn main() -> Result<()> {
         }
         
         let prev_path = &state.playlist[state.current_index];
+        let prev_track = &state.tracks[state.current_index];
         let uri = format!("file://{}", prev_path.to_string_lossy());
         println!("Playing Prev: {}", uri);
         let _ = engine_prev.play_file(&uri);
         
         // Update UI
-        let ui = ui_prev.unwrap();
-        ui.set_track_title(prev_path.file_name().unwrap().to_string_lossy().to_string().into());
+        if let Some(ui) = ui_prev.upgrade() {
+            ui.set_track_title(prev_track.title.clone().into());
+            ui.set_track_artist(prev_track.artist.clone().into());
+
+            if let Some(cp) = find_cover_art(prev_path.parent().unwrap_or(prev_path)) {
+                update_ui_theme(ui_prev.clone(), &cp);
+            }
+        }
     });
 
     // Auto-advance loop
@@ -218,26 +166,37 @@ async fn main() -> Result<()> {
             
             let is_busy = engine_poll.is_busy();
             
-            // If we were playing and now we are not busy (queue empty), move to next
-            // Note: This is a simple logic. If player starts paused, it won't auto-advance.
-            // But if we just finished a track, is_busy becomes false.
             if was_playing && !is_busy {
                  let mut state = state_poll.lock().unwrap();
                  if !state.playlist.is_empty() {
                     state.current_index = (state.current_index + 1) % state.playlist.len();
                     let next_path = &state.playlist[state.current_index];
+                    let next_track = &state.tracks[state.current_index];
                     let uri = format!("file://{}", next_path.to_string_lossy());
                     println!("Auto-advancing to: {}", uri);
                     let _ = engine_poll.play_file(&uri);
                     
-                    let next_title = next_path.file_name().unwrap().to_string_lossy().to_string();
-                    
+                    let title = next_track.title.clone();
+                    let artist = next_track.artist.clone();
+                    let cover_path = find_cover_art(next_path.parent().unwrap_or(next_path));
+
                     let ui_weak = ui_poll.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                          if let Some(ui) = ui_weak.upgrade() {
-                             ui.set_track_title(next_title.into());
+                             ui.set_track_title(title.into());
+                             ui.set_track_artist(artist.into());
+                             if let Some(cp) = cover_path {
+                                 if let Ok(slint_img) = slint::Image::load_from_path(&cp) {
+                                     ui.set_album_art(slint_img);
+                                 }
+                             }
                          }
                     });
+
+                    // Trigger palette update separately (it also uses invoke_from_event_loop)
+                    if let Some(cp) = find_cover_art(next_path.parent().unwrap_or(next_path)) {
+                        update_ui_theme(ui_poll.clone(), &cp);
+                    }
                  }
             }
             
@@ -248,6 +207,41 @@ async fn main() -> Result<()> {
     ui.run()?;
 
     Ok(())
+}
+
+fn find_cover_art(dir: &Path) -> Option<PathBuf> {
+    if !dir.is_dir() { return None; }
+    std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).find(|e| {
+        let name = e.file_name().to_string_lossy().to_lowercase();
+        let is_image = ["jpg", "jpeg", "png"].iter().any(|ext| name.ends_with(ext));
+        let is_common_name = name.starts_with("cover") || name.starts_with("folder") || name.starts_with("front") || name.contains("album");
+        is_image && (is_common_name || true)
+    }).map(|e| e.path())
+}
+
+fn update_ui_theme(ui_handle: slint::Weak<MainWindow>, cover_path: &Path) {
+    if let Ok(palette) = extract_palette(cover_path) {
+        let p = ThreadSafePalette {
+            bg: palette.background,
+            primary: palette.primary,
+            secondary: palette.secondary,
+            accent: palette.accent,
+        };
+        let cp = cover_path.to_path_buf();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                let colors = ui.global::<AppColors>();
+                colors.set_background(slint::Color::from_argb_u8(255, parse_hex(&p.bg, 1), parse_hex(&p.bg, 3), parse_hex(&p.bg, 5)));
+                colors.set_primary(slint::Color::from_argb_u8(255, parse_hex(&p.primary, 1), parse_hex(&p.primary, 3), parse_hex(&p.primary, 5)));
+                colors.set_secondary(slint::Color::from_argb_u8(255, parse_hex(&p.secondary, 1), parse_hex(&p.secondary, 3), parse_hex(&p.secondary, 5)));
+                colors.set_accent(slint::Color::from_argb_u8(255, parse_hex(&p.accent, 1), parse_hex(&p.accent, 3), parse_hex(&p.accent, 5)));
+                
+                if let Ok(slint_img) = slint::Image::load_from_path(&cp) {
+                    ui.set_album_art(slint_img);
+                }
+            }
+        });
+    }
 }
 
 fn parse_hex(hex: &str, start: usize) -> u8 {

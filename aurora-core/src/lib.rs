@@ -1,6 +1,23 @@
 use anyhow::Result;
-use rusqlite::Connection;
-use std::path::PathBuf;
+use rusqlite::{params, Connection};
+use std::path::{Path, PathBuf};
+use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::tag::{Accessor, TagExt};
+use lofty::prelude::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Track {
+    pub id: i64,
+    pub path: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration: u32,
+    pub track_number: Option<u32>,
+    pub year: Option<u32>,
+    pub genre: Option<String>,
+}
 
 pub struct LibraryManager {
     conn: Connection,
@@ -16,31 +33,105 @@ impl LibraryManager {
 
     fn initialize_schema(&self) -> Result<()> {
         self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS tracks (
-                id INTEGER PRIMARY KEY,
-                path TEXT NOT NULL UNIQUE,
-                title TEXT,
-                artist TEXT,
-                album TEXT,
-                genre TEXT,
-                duration INTEGER,
-                track_number INTEGER,
-                year INTEGER
+            "CREATE TABLE IF NOT EXISTS artists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE
             )",
             [],
         )?;
-        Ok(())
-    }
 
-    pub fn add_track(&self, path: &str, title: Option<&str>, artist: Option<&str>, album: Option<&str>) -> Result<()> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO tracks (path, title, artist, album) VALUES (?1, ?2, ?3, ?4)",
-            [path, title.unwrap_or(""), artist.unwrap_or(""), album.unwrap_or("")],
+            "CREATE TABLE IF NOT EXISTS albums (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                artist_id INTEGER,
+                cover_path TEXT,
+                UNIQUE(title, artist_id),
+                FOREIGN KEY(artist_id) REFERENCES artists(id)
+            )",
+            [],
         )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS tracks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                artist_id INTEGER,
+                album_id INTEGER,
+                duration INTEGER,
+                track_number INTEGER,
+                year INTEGER,
+                genre TEXT,
+                FOREIGN KEY(artist_id) REFERENCES artists(id),
+                FOREIGN KEY(album_id) REFERENCES albums(id)
+            )",
+            [],
+        )?;
+
         Ok(())
     }
 
-    pub fn scan_directory(&self, path: &PathBuf) -> Result<()> {
+    fn get_or_create_artist(&self, name: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO artists (name) VALUES (?1)",
+            params![name],
+        )?;
+        let id = self.conn.query_row(
+            "SELECT id FROM artists WHERE name = ?1",
+            params![name],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    fn get_or_create_album(&self, title: &str, artist_id: i64) -> Result<i64> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO albums (title, artist_id) VALUES (?1, ?2)",
+            params![title, artist_id],
+        )?;
+        let id = self.conn.query_row(
+            "SELECT id FROM albums WHERE title = ?1 AND artist_id = ?2",
+            params![title, artist_id],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    pub fn add_track(&self, path: &Path) -> Result<()> {
+        let tagged_file = lofty::read_from_path(path)?;
+        let tag = tagged_file.primary_tag()
+            .or_else(|| tagged_file.first_tag());
+        
+        let properties = tagged_file.properties();
+        let duration = properties.duration().as_secs() as u32;
+
+        let title = tag.and_then(|t| t.title().map(|s| s.into_owned()))
+            .unwrap_or_else(|| path.file_stem().unwrap().to_string_lossy().into_owned());
+        let artist_name = tag.and_then(|t| t.artist().map(|s| s.into_owned()))
+            .unwrap_or_else(|| "Unknown Artist".to_string());
+        let album_title = tag.and_then(|t| t.album().map(|s| s.into_owned()))
+            .unwrap_or_else(|| "Unknown Album".to_string());
+        
+        let track_number = tag.and_then(|t| t.track());
+        let year = tag.and_then(|t| t.year());
+        let genre = tag.and_then(|t| t.genre().map(|s| s.into_owned()));
+
+        let artist_id = self.get_or_create_artist(&artist_name)?;
+        let album_id = self.get_or_create_album(&album_title, artist_id)?;
+
+        let path_str = path.to_string_lossy();
+
+        self.conn.execute(
+            "INSERT OR REPLACE INTO tracks (path, title, artist_id, album_id, duration, track_number, year, genre)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![path_str, title, artist_id, album_id, duration, track_number, year, genre],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn scan_directory(&self, path: &Path) -> Result<()> {
         if path.is_dir() {
             for entry in std::fs::read_dir(path)? {
                 let entry = entry?;
@@ -48,16 +139,46 @@ impl LibraryManager {
                 if path.is_dir() {
                     self.scan_directory(&path)?;
                 } else if is_audio_file(&path) {
-                    let path_str = path.to_str().unwrap_or("");
-                    self.add_track(path_str, None, None, None)?;
+                    if let Err(e) = self.add_track(&path) {
+                        log::error!("Failed to add track {:?}: {}", path, e);
+                    }
                 }
             }
         }
         Ok(())
     }
+
+    pub fn get_all_tracks(&self) -> Result<Vec<Track>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.path, t.title, ar.name as artist, al.title as album, t.duration, t.track_number, t.year, t.genre
+             FROM tracks t
+             JOIN artists ar ON t.artist_id = ar.id
+             JOIN albums al ON t.album_id = al.id"
+        )?;
+
+        let track_iter = stmt.query_map([], |row| {
+            Ok(Track {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                title: row.get(2)?,
+                artist: row.get(3)?,
+                album: row.get(4)?,
+                duration: row.get(5)?,
+                track_number: row.get(6)?,
+                year: row.get(7)?,
+                genre: row.get(8)?,
+            })
+        })?;
+
+        let mut tracks = Vec::new();
+        for track in track_iter {
+            tracks.push(track?);
+        }
+        Ok(tracks)
+    }
 }
 
-fn is_audio_file(path: &PathBuf) -> bool {
+fn is_audio_file(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|s| s.to_str()),
         Some("mp3") | Some("flac") | Some("wav") | Some("m4a") | Some("ogg")
