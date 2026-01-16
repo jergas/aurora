@@ -1,6 +1,6 @@
 use anyhow::{Result, Context};
 use image::GenericImageView;
-use palette::{FromColor, Srgb, Lch};
+use palette::Srgb;
 use std::path::Path;
 
 pub struct ThemePalette {

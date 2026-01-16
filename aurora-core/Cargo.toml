@@ -12,3 +12,4 @@ thiserror.workspace = true
 log.workspace = true
 tokio.workspace = true
 lofty.workspace = true
+mlua.workspace = true

@@ -1,7 +1,8 @@
 use anyhow::Result;
-use aurora_audio::AudioEngine;
-use aurora_core::{LibraryManager, Track};
-use aurora_ui::{MainWindow, ThemePalette, extract_palette, AppColors};
+use aurora_audio::{AudioEngine, ScriptableAudioEngine};
+use aurora_core::{LibraryManager, Track, ScriptableLibraryManager};
+use aurora_script::ScriptHost;
+use aurora_ui::{MainWindow, extract_palette, AppColors};
 use slint::ComponentHandle;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -24,6 +25,22 @@ async fn main() -> Result<()> {
     // Initialize Library Manager
     let library = Arc::new(LibraryManager::new(PathBuf::from("aurora.db"))?);
     println!("Library Manager initialized.");
+
+    // Initialize Scripting Host
+    let script_host = ScriptHost::new()?;
+    script_host.register_global("player", ScriptableAudioEngine(engine.clone()))?;
+    script_host.register_global("library", ScriptableLibraryManager(library.clone()))?;
+    println!("Scripting Host initialized.");
+
+    // Run startup script if exists
+    let startup_script = "
+        print('Hello from Lua startup script!')
+        local tracks = library:get_all_tracks()
+        print('Found ' .. #tracks .. ' tracks in library.')
+    ";
+    if let Err(e) = script_host.run_script(startup_script) {
+        log::error!("Failed to run startup script: {}", e);
+    }
 
     let ui = aurora_ui::create_window();
     let ui_handle = ui.as_weak();

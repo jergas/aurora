@@ -77,3 +77,34 @@ impl AudioEngine {
         !self.sink.lock().unwrap().empty()
     }
 }
+
+pub struct ScriptableAudioEngine(pub Arc<AudioEngine>);
+
+impl mlua::UserData for ScriptableAudioEngine {
+    fn add_methods<'lua, M: mlua::UserDataMethods<'lua, Self>>(methods: &mut M) {
+        methods.add_method("play_file", |_lua, this, uri: String| {
+            this.0.play_file(&uri).map_err(mlua::Error::external)
+        });
+
+        methods.add_method("pause", |_lua, this, ()| {
+            this.0.pause().map_err(mlua::Error::external)
+        });
+
+        methods.add_method("resume", |_lua, this, ()| {
+            this.0.resume().map_err(mlua::Error::external)
+        });
+
+        methods.add_method("stop", |_lua, this, ()| {
+            this.0.stop().map_err(mlua::Error::external)
+        });
+
+        methods.add_method("set_volume", |_lua, this, volume: f32| {
+            this.0.set_volume(volume);
+            Ok(())
+        });
+
+        methods.add_method("is_busy", |_lua, this, ()| {
+            Ok(this.0.is_busy())
+        });
+    }
+}

@@ -8,3 +8,4 @@ rodio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true
+mlua.workspace = true

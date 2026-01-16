@@ -1,9 +1,9 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use lofty::file::{AudioFile, TaggedFileExt};
-use lofty::tag::{Accessor, TagExt};
-use lofty::prelude::*;
+use lofty::tag::Accessor;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -175,6 +175,31 @@ impl LibraryManager {
             tracks.push(track?);
         }
         Ok(tracks)
+    }
+}
+
+impl mlua::UserData for Track {
+    fn add_fields<'lua, F: mlua::UserDataFields<'lua, Self>>(fields: &mut F) {
+        fields.add_field_method_get("id", |_lua, this| Ok(this.id));
+        fields.add_field_method_get("path", |_lua, this| Ok(this.path.clone()));
+        fields.add_field_method_get("title", |_lua, this| Ok(this.title.clone()));
+        fields.add_field_method_get("artist", |_lua, this| Ok(this.artist.clone()));
+        fields.add_field_method_get("album", |_lua, this| Ok(this.album.clone()));
+        fields.add_field_method_get("duration", |_lua, this| Ok(this.duration));
+    }
+}
+
+pub struct ScriptableLibraryManager(pub Arc<LibraryManager>);
+
+impl mlua::UserData for ScriptableLibraryManager {
+    fn add_methods<'lua, M: mlua::UserDataMethods<'lua, Self>>(methods: &mut M) {
+        methods.add_method("scan_directory", |_lua, this, path: String| {
+            this.0.scan_directory(Path::new(&path)).map_err(mlua::Error::external)
+        });
+
+        methods.add_method("get_all_tracks", |_lua, this, ()| {
+            this.0.get_all_tracks().map_err(mlua::Error::external)
+        });
     }
 }
 

@@ -520,6 +520,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "log",
+ "mlua",
  "rodio",
  "thiserror 1.0.69",
 ]
@@ -531,6 +532,7 @@ dependencies = [
  "anyhow",
  "lofty",
  "log",
+ "mlua",
  "rusqlite",
  "serde",
  "serde_json",
