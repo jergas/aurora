@@ -8,3 +8,5 @@ mlua.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true
+aurora-ui = { path = "../aurora-ui" }
+slint.workspace = true

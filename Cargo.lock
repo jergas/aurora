@@ -560,8 +560,10 @@ name = "aurora-script"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aurora-ui",
  "log",
  "mlua",
+ "slint",
  "thiserror 1.0.69",
 ]
 
