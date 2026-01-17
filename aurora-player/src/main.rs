@@ -37,22 +37,6 @@ async fn main() -> Result<()> {
     script_host.register_global("ui", ScriptableUI(ui_handle.clone()))?;
     println!("Scripting Host initialized.");
 
-    // Run startup script if exists
-    let startup_script = "
-        print('Hello from Lua startup script!')
-        local tracks = library:get_all_tracks()
-        print('Found ' .. #tracks .. ' tracks in library.')
-        
-        -- Test UI control
-        ui:set_background('#1a1a1a')
-        ui:set_primary('#ff0055')
-    ";
-    if let Err(e) = script_host.run_script(startup_script) {
-        log::error!("Failed to run startup script: {}", e);
-    }
-
-
-
     // Simple test if a file is provided as argument
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 {
@@ -65,47 +49,77 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Load playlist from library
+    // Load tracks from library
     let tracks = library.get_all_tracks()?;
-    let playlist: Vec<PathBuf> = tracks.iter().map(|t| PathBuf::from(&t.path)).collect();
+    println!("Loaded {} tracks from library.", tracks.len());
     
     // Shared state for playback control
     struct PlayerState {
-        playlist: Vec<PathBuf>,
         tracks: Vec<Track>,
         current_index: usize,
     }
     
     let state = Arc::new(Mutex::new(PlayerState {
-        playlist: playlist,
-        tracks: tracks,
+        tracks: tracks.clone(),
         current_index: 0,
     }));
 
-    // Find cover art for initial track if any
-    let initial_cover = {
-        let state = state.lock().unwrap();
-        if !state.playlist.is_empty() {
-            let path = &state.playlist[0];
-            find_cover_art(path.parent().unwrap_or(path))
-        } else {
-            None
-        }
-    };
+    // Populate UI Library
+    let slint_tracks: Vec<aurora_ui::LibraryTrack> = tracks.iter().map(|t| aurora_ui::LibraryTrack {
+        id: t.id as i32,
+        title: t.title.clone().into(),
+        artist: t.artist.clone().into(),
+        album: t.album.clone().into(),
+    }).collect();
+    
+    let model = std::rc::Rc::new(slint::VecModel::from(slint_tracks));
+    ui.set_library_tracks(slint::ModelRc::from(model.clone()));
 
-    if let Some(cp) = initial_cover {
-        update_ui_theme(ui_handle.clone(), &cp);
-    }
+    // Handle track selection from UI
+    let ui_handle_select = ui.as_weak();
+    let engine_select = engine.clone();
+    let state_select = state.clone();
+    ui.on_track_selected(move |index| {
+        let index = index as usize;
+        println!("UI: Track selected at index {}", index);
+        let mut state = state_select.lock().unwrap();
+        if index < state.tracks.len() {
+            state.current_index = index;
+            let track = &state.tracks[index];
+            let uri = format!("file://{}", track.path);
+            
+            if let Err(e) = engine_select.play_file(&uri) {
+                log::error!("Failed to play selected track: {}", e);
+                return;
+            }
+            
+            if let Some(ui) = ui_handle_select.upgrade() {
+                ui.set_track_title(track.title.clone().into());
+                ui.set_track_artist(track.artist.clone().into());
+                
+                // Update theme
+                let cover_art = find_cover_art(Path::new(&track.path).parent().unwrap_or(Path::new(&track.path)));
+                if let Some(cp) = cover_art {
+                    update_ui_theme(ui_handle_select.clone(), &cp);
+                }
+            }
+        }
+    });
 
     // Play first track if available
     {
         let state = state.lock().unwrap();
-        if !state.playlist.is_empty() {
-            let path = &state.playlist[0];
-            let uri = format!("file://{}", path.to_string_lossy());
+        if !state.tracks.is_empty() {
+            let track = &state.tracks[0];
+            let uri = format!("file://{}", track.path);
             engine.play_file(&uri)?;
-            ui.set_track_title(state.tracks[0].title.clone().into());
-            ui.set_track_artist(state.tracks[0].artist.clone().into());
+            ui.set_track_title(track.title.clone().into());
+            ui.set_track_artist(track.artist.clone().into());
+            
+            let cover_art = find_cover_art(Path::new(&track.path).parent().unwrap_or(Path::new(&track.path)));
+            if let Some(cp) = cover_art {
+                update_ui_theme(ui_handle.clone(), &cp);
+            }
         }
     }
 
@@ -131,12 +145,12 @@ async fn main() -> Result<()> {
 
     ui.on_next(move || {
         let mut state = state_next.lock().unwrap();
-        if state.playlist.is_empty() { return; }
+        if state.tracks.is_empty() { return; }
+
+        state.current_index = (state.current_index + 1) % state.tracks.len();
         
-        state.current_index = (state.current_index + 1) % state.playlist.len();
-        let next_path = &state.playlist[state.current_index];
         let next_track = &state.tracks[state.current_index];
-        let uri = format!("file://{}", next_path.to_string_lossy());
+        let uri = format!("file://{}", next_track.path);
         println!("Playing Next: {}", uri);
         let _ = engine_next.play_file(&uri);
         
@@ -146,25 +160,26 @@ async fn main() -> Result<()> {
             ui.set_track_artist(next_track.artist.clone().into());
             
             // Update cover & theme
-            if let Some(cp) = find_cover_art(next_path.parent().unwrap_or(next_path)) {
+            let track_path = Path::new(&next_track.path);
+            if let Some(cp) = find_cover_art(track_path.parent().unwrap_or(track_path)) {
                 update_ui_theme(ui_next.clone(), &cp);
             }
         }
     });
 
+
     ui.on_prev(move || {
         let mut state = state_prev.lock().unwrap();
-        if state.playlist.is_empty() { return; }
+        if state.tracks.is_empty() { return; }
 
         if state.current_index == 0 {
-            state.current_index = state.playlist.len() - 1;
+            state.current_index = state.tracks.len() - 1;
         } else {
             state.current_index -= 1;
         }
         
-        let prev_path = &state.playlist[state.current_index];
         let prev_track = &state.tracks[state.current_index];
-        let uri = format!("file://{}", prev_path.to_string_lossy());
+        let uri = format!("file://{}", prev_track.path);
         println!("Playing Prev: {}", uri);
         let _ = engine_prev.play_file(&uri);
         
@@ -173,7 +188,8 @@ async fn main() -> Result<()> {
             ui.set_track_title(prev_track.title.clone().into());
             ui.set_track_artist(prev_track.artist.clone().into());
 
-            if let Some(cp) = find_cover_art(prev_path.parent().unwrap_or(prev_path)) {
+            let track_path = Path::new(&prev_track.path);
+            if let Some(cp) = find_cover_art(track_path.parent().unwrap_or(track_path)) {
                 update_ui_theme(ui_prev.clone(), &cp);
             }
         }
@@ -193,34 +209,35 @@ async fn main() -> Result<()> {
             
             if was_playing && !is_busy {
                  let mut state = state_poll.lock().unwrap();
-                 if !state.playlist.is_empty() {
-                    state.current_index = (state.current_index + 1) % state.playlist.len();
-                    let next_path = &state.playlist[state.current_index];
+                 if !state.tracks.is_empty() {
+                    state.current_index = (state.current_index + 1) % state.tracks.len();
                     let next_track = &state.tracks[state.current_index];
-                    let uri = format!("file://{}", next_path.to_string_lossy());
+                    let uri = format!("file://{}", next_track.path);
                     println!("Auto-advancing to: {}", uri);
                     let _ = engine_poll.play_file(&uri);
                     
                     let title = next_track.title.clone();
                     let artist = next_track.artist.clone();
-                    let cover_path = find_cover_art(next_path.parent().unwrap_or(next_path));
+                    let track_path = PathBuf::from(&next_track.path);
+                    let cover_path = find_cover_art(track_path.parent().unwrap_or(&track_path));
 
                     let ui_weak = ui_poll.clone();
+                    let cp_for_theme = cover_path.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                          if let Some(ui) = ui_weak.upgrade() {
                              ui.set_track_title(title.into());
                              ui.set_track_artist(artist.into());
-                             if let Some(cp) = cover_path {
-                                 if let Ok(slint_img) = slint::Image::load_from_path(&cp) {
+                             if let Some(ref cp) = cover_path {
+                                 if let Ok(slint_img) = slint::Image::load_from_path(cp) {
                                      ui.set_album_art(slint_img);
                                  }
                              }
                          }
                     });
 
-                    // Trigger palette update separately (it also uses invoke_from_event_loop)
-                    if let Some(cp) = find_cover_art(next_path.parent().unwrap_or(next_path)) {
-                        update_ui_theme(ui_poll.clone(), &cp);
+                    // Trigger palette update separately
+                    if let Some(ref cp) = cp_for_theme {
+                        update_ui_theme(ui_poll.clone(), cp);
                     }
                  }
             }

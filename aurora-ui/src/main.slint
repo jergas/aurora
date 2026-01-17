@@ -1,4 +1,4 @@
-import { Button, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Button, VerticalBox, HorizontalBox, ListView } from "std-widgets.slint";
 
 export global AppColors {
     in-out property <color> background: #121212;
@@ -7,72 +7,133 @@ export global AppColors {
     in-out property <color> accent: #b3b3b3;
 }
 
+export struct LibraryTrack {
+    id: int,
+    title: string,
+    artist: string,
+    album: string,
+}
+
 export component MainWindow inherits Window {
     title: "Aurora Player";
     background: AppColors.background;
-    min-width: 800px;
+    min-width: 900px;
     min-height: 600px;
 
     in property <string> track-title: "No track playing";
     in property <string> track-artist: "Unknown Artist";
     in property <image> album-art: @image-url("");
+    in property <[LibraryTrack]> library-tracks: [];
 
     callback play-pause();
     callback next();
     callback prev();
+    callback track-selected(int);
 
-    VerticalBox {
-        alignment: center;
-        spacing: 20px;
+    HorizontalBox {
+        padding: 0;
+        spacing: 0;
 
-        // Album Art
+        // Sidebar: Library Browser
         Rectangle {
             width: 300px;
-            height: 300px;
-            background: #282828;
-            border-radius: 8px;
-            Image {
-                source: album-art;
-                width: 100%;
-                height: 100%;
-                image-fit: contain;
+            background: AppColors.background.darker(0.2);
+            
+                VerticalBox {
+                    padding: 10px;
+                    spacing: 10px;
+                    Text {
+                        text: "Library";
+                        font-size: 20px;
+                        color: AppColors.primary;
+                    }
+                
+                ListView {
+                    for track[i] in library-tracks: Rectangle {
+                        height: 50px;
+                        background: touch.pressed ? AppColors.primary.with-alpha(0.3) : (touch.has-hover ? AppColors.primary.with-alpha(0.1) : transparent);
+                        border-radius: 4px;
+                        
+                        touch := TouchArea {
+                            clicked => { track-selected(i) }
+                        }
+                        
+                        VerticalBox {
+                            alignment: center;
+                            padding-left: 10px;
+                            Text {
+                                text: track.title;
+                                font-size: 14px;
+                                color: AppColors.secondary;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: track.artist;
+                                font-size: 12px;
+                                color: AppColors.accent;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        // Metadata
+        // Main Content: Now Playing
         VerticalBox {
             alignment: center;
-            spacing: 5px;
-            Text {
-                text: track-title;
-                font-size: 24px;
-                color: AppColors.secondary;
-                horizontal-alignment: center;
-            }
-            Text {
-                text: track-artist;
-                font-size: 18px;
-                color: AppColors.accent;
-                horizontal-alignment: center;
-            }
-        }
-
-        // Controls
-        HorizontalBox {
-            alignment: center;
             spacing: 20px;
-            Button {
-                text: "Prev";
-                clicked => { prev() }
+            padding: 20px;
+
+            // Album Art
+            Rectangle {
+                width: 300px;
+                height: 300px;
+                background: #282828;
+                border-radius: 8px;
+                Image {
+                    source: album-art;
+                    width: 100%;
+                    height: 100%;
+                    image-fit: contain;
+                }
             }
-            Button {
-                text: "Play/Pause";
-                primary: true;
-                clicked => { play-pause() }
+
+            // Metadata
+            VerticalBox {
+                alignment: center;
+                spacing: 5px;
+                Text {
+                    text: track-title;
+                    font-size: 24px;
+                    color: AppColors.secondary;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: track-artist;
+                    font-size: 18px;
+                    color: AppColors.accent;
+                    horizontal-alignment: center;
+                }
             }
-            Button {
-                text: "Next";
-                clicked => { next() }
+
+            // Controls
+            HorizontalBox {
+                alignment: center;
+                spacing: 20px;
+                Button {
+                    text: "Prev";
+                    clicked => { prev() }
+                }
+                Button {
+                    text: "Play/Pause";
+                    primary: true;
+                    clicked => { play-pause() }
+                }
+                Button {
+                    text: "Next";
+                    clicked => { next() }
+                }
             }
         }
     }

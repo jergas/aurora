@@ -6,7 +6,7 @@ use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::tag::Accessor;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Track {
     pub id: i64,
     pub path: String,
